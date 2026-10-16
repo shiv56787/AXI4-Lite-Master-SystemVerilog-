@@ -1,0 +1,122 @@
+`timescale 1ns/1ps
+module tb_axi4_lite_master;
+  localparam int aw = 32, dw = 32;
+  logic aclk = 0, aresetn = 0;
+  always #5 aclk = ~aclk;
+
+  // user side
+  logic cmd_valid = 0, cmd_write = 0;
+  logic cmd_ready;
+  logic [aw-1:0] cmd_addr = 0;
+  logic [dw-1:0] cmd_wdata = 0;
+  logic [dw/8-1:0] cmd_wstrb = 0;
+  logic rsp_valid, rsp_is_write;
+  logic [dw-1:0] rsp_rdata;
+  logic [1:0] rsp_resp;
+
+  // axi
+  logic [aw-1:0] awaddr, araddr;
+  logic [2:0] awprot, arprot;
+  logic awvalid, awready, wvalid, wready, bvalid, bready, arvalid, arready, rvalid, rready;
+  logic [dw-1:0] wdata, rdata;
+  logic [dw/8-1:0] wstrb;
+  logic [1:0] bresp, rresp;
+
+  axi4_lite_master #(.addr_w(aw), .data_w(dw)) dut (
+    .aclk, .aresetn,
+    .cmd_valid, .cmd_ready, .cmd_write, .cmd_addr, .cmd_wdata, .cmd_wstrb,
+    .rsp_valid, .rsp_is_write, .rsp_rdata, .rsp_resp,
+    .m_axi_awaddr(awaddr), .m_axi_awprot(awprot), .m_axi_awvalid(awvalid), .m_axi_awready(awready),
+    .m_axi_wdata(wdata), .m_axi_wstrb(wstrb), .m_axi_wvalid(wvalid), .m_axi_wready(wready),
+    .m_axi_bresp(bresp), .m_axi_bvalid(bvalid), .m_axi_bready(bready),
+    .m_axi_araddr(araddr), .m_axi_arprot(arprot), .m_axi_arvalid(arvalid), .m_axi_arready(arready),
+    .m_axi_rdata(rdata), .m_axi_rresp(rresp), .m_axi_rvalid(rvalid), .m_axi_rready(rready)
+  );
+
+  //  simple slave
+  logic [31:0] mem [0:15];
+  assign awready = awvalid && wvalid && !bvalid;
+  assign wready  = awready;
+  assign arready = arvalid && !rvalid;
+
+  always_ff @(posedge aclk or negedge aresetn) begin
+    if (!aresetn) begin
+      bvalid <= 0; rvalid <= 0;
+      bresp  <= 0;
+      rresp  <= 0;
+      rdata  <= 0;
+    end else begin
+      if (awvalid && awready) begin
+        for (int i = 0; i < 4; i++)
+          if (wstrb[i]) mem[awaddr[5:2]][8*i +: 8] <= wdata[8*i +: 8];
+        bvalid <= 1;
+      end
+      if (bvalid && bready) bvalid <= 0;
+      if (arvalid && arready) begin
+        rdata  <= mem[araddr[5:2]];
+        rvalid <= 1;
+      end
+      if (rvalid && rready) rvalid <= 0;
+    end
+  end
+
+  //  tasks
+  int errors = 0;
+
+  task automatic send(input bit wr, input [31:0] a, input [31:0] d, input [3:0] s);
+    @(negedge aclk);
+    cmd_valid = 1; cmd_write = wr; cmd_addr = a; cmd_wdata = d; cmd_wstrb = s;
+    while (!cmd_ready) @(negedge aclk);
+    @(negedge aclk);
+    cmd_valid = 0;
+    while (!rsp_valid) @(negedge aclk);
+  endtask
+
+  task automatic write(input [31:0] a, input [31:0] d, input [3:0] s = 4'hf);
+    send(1, a, d, s);
+    if (rsp_resp !== 2'b00) begin
+      errors++;
+      $display("FAIL: WR @%h resp=%b", a, rsp_resp);
+    end
+  endtask
+
+  task automatic read_check(input [31:0] a, input [31:0] exp);
+    send(0, a, 0, 0);
+    if (rsp_rdata !== exp) begin
+      errors++;
+      $display("FAIL: RD @%h got=%h exp=%h", a, rsp_rdata, exp);
+    end else
+      $display("PASS: RD @%h = %h", a, rsp_rdata);
+  endtask
+
+  //  test
+  initial begin
+    repeat (3) @(posedge aclk);
+    aresetn = 1;
+
+    // single write + read
+    write(32'h00, 32'hDEAD_BEEF);
+    read_check(32'h00, 32'hDEAD_BEEF);
+
+    //byte strobe
+    write(32'h04, 32'hFFFF_FFFF);
+    write(32'h04, 32'h1122_3344, 4'b0011);
+    read_check(32'h04, 32'hFFFF_3344);
+
+    //back to bak(8 write, 8 read)
+    for (int i = 0; i < 8; i++) write(32'h10 + 4*i, 32'hA000 + i);
+    for (int i = 0; i < 8; i++) read_check(32'h10 + 4*i, 32'hA000 + i);
+
+    $display("-----------");
+    if (errors == 0) $display("RESULT: PASS");
+    else    $display("RESULT: FAIL (%0d errors)", errors);
+    $finish;
+  end
+
+  initial begin #100000; $display("TIMEOUT"); $finish; end
+    
+  initial begin
+    $dumpfile("axi4_lite_master.vcd");
+    $dumpvars(0, tb_axi4_lite_master);
+  end
+endmodule
