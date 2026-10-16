@@ -1,0 +1,150 @@
+module axi4_lite_master #(
+  parameter int addr_w = 32,
+  parameter int data_w = 32
+)(
+  input  logic aclk,
+  input  logic aresetn,
+
+  // user command interface
+  input  logic  cmd_valid,
+  output logic  cmd_ready,
+  input  logic   cmd_write, // 1 = write, 0 = read
+  input  logic [addr_w-1:0]  cmd_addr,
+  input  logic [data_w-1:0]  cmd_wdata,
+  input  logic [data_w/8-1:0] cmd_wstrb,
+
+  // user response interface
+  output logic   rsp_valid,
+  output logic   rsp_is_write,
+  output logic [data_w-1:0]  rsp_rdata,
+  output logic [1:0]  rsp_resp,  // 00 okay, 10 slverr, 11 decerr
+
+  // axi4_lite master port
+  // write address channel
+  output logic [addr_w-1:0]     m_axi_awaddr,
+  output logic [2:0]            m_axi_awprot,
+  output logic  m_axi_awvalid,
+  input  logic  m_axi_awready,
+
+  // write data channel
+  output logic [data_w-1:0]     m_axi_wdata,
+  output logic [data_w/8-1:0]   m_axi_wstrb,
+  output logic  m_axi_wvalid,
+  input  logic   m_axi_wready,
+
+  // write response channel
+  input  logic [1:0]   m_axi_bresp,
+  input  logic      m_axi_bvalid,
+  output logic     m_axi_bready,
+
+  // read address channel
+  output logic [addr_w-1:0]     m_axi_araddr,
+  output logic [2:0]  m_axi_arprot,
+  output logic         m_axi_arvalid,
+  input  logic    m_axi_arready,
+
+  // read data channel
+  input  logic [data_w-1:0]     m_axi_rdata,
+  input  logic [1:0]     m_axi_rresp,
+  input  logic      m_axi_rvalid,
+  output logic      m_axi_rready
+);
+
+  typedef enum logic [2:0] {
+    s_idle,
+    s_wr_addr_data,
+    s_wr_resp,
+    s_rd_addr,
+    s_rd_data
+  } state_t;
+
+  state_t state;
+
+  logic [addr_w-1:0]   addr_q;
+  logic [data_w-1:0]   wdata_q;
+  logic [data_w/8-1:0] wstrb_q;
+
+  assign cmd_ready    = (state == s_idle);
+  assign m_axi_awaddr = addr_q;
+  assign m_axi_araddr = addr_q;
+  assign m_axi_wdata  = wdata_q;
+  assign m_axi_wstrb  = wstrb_q;
+  assign m_axi_awprot = 3'b000;
+  assign m_axi_arprot = 3'b000;
+  assign m_axi_bready = (state == s_wr_resp);
+  assign m_axi_rready = (state == s_rd_data);
+
+  always_ff @(posedge aclk or negedge aresetn) begin
+    if (!aresetn) begin
+      state         <= s_idle;
+      addr_q    <= '0;
+      wdata_q       <= '0;
+      wstrb_q    <= '0;
+      m_axi_awvalid <= 1'b0;
+         m_axi_wvalid  <= 1'b0;
+      m_axi_arvalid <= 1'b0;
+           rsp_valid     <= 1'b0;
+      rsp_is_write  <= 1'b0;
+      rsp_rdata     <= '0;
+      rsp_resp      <= 2'b00;
+    end else begin
+      rsp_valid <= 1'b0;
+
+      case (state)
+        s_idle: begin
+          if (cmd_valid) begin
+            addr_q  <= cmd_addr;
+                wdata_q <= cmd_wdata;
+            wstrb_q <= cmd_wstrb;
+            if (cmd_write) begin
+                   m_axi_awvalid <= 1'b1;
+              m_axi_wvalid  <= 1'b1;
+              state         <= s_wr_addr_data;
+                   end else begin
+              m_axi_arvalid <= 1'b1;
+              state         <= s_rd_addr;
+            end
+          end
+        end
+
+        s_wr_addr_data: begin
+          if (m_axi_awvalid && m_axi_awready) m_axi_awvalid <= 1'b0;
+          if (m_axi_wvalid  && m_axi_wready ) m_axi_wvalid  <= 1'b0;
+
+          if ((!m_axi_awvalid || m_axi_awready) &&
+              (!m_axi_wvalid  || m_axi_wready))
+            state <= s_wr_resp;
+        end
+
+        s_wr_resp: begin
+          if (m_axi_bvalid) begin
+            rsp_valid    <= 1'b1;
+                   rsp_is_write <= 1'b1;
+            rsp_resp     <= m_axi_bresp;
+            state        <= s_idle;
+          end
+        end
+
+        s_rd_addr: begin
+                if (m_axi_arvalid && m_axi_arready) begin
+            m_axi_arvalid <= 1'b0;
+            state         <= s_rd_data;
+          end
+        end
+
+        s_rd_data: begin
+          if (m_axi_rvalid) begin
+            rsp_valid    <= 1'b1;
+            rsp_is_write <= 1'b0;
+                 rsp_rdata    <= m_axi_rdata;
+            rsp_resp     <= m_axi_rresp;
+            state        <= s_idle;
+          end
+        end
+
+        default: state <= s_idle;
+      endcase
+    end
+  end
+
+endmodule
